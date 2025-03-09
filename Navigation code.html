@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Navigation Software</title>
+<meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.10.0/mapbox-gl.css" rel="stylesheet">
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.10.0/mapbox-gl.js"></script>
+<script src="https://api.mapbox.com/mapbox-gl-js/plugins/mapbox-gl-geocoder/v4.7.2/mapbox-gl-geocoder.min.js"></script>
+<link rel="stylesheet" href="https://api.mapbox.com/mapbox-gl-js/plugins/mapbox-gl-geocoder/v4.7.2/mapbox-gl-geocoder.css">
+<script async defer src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY&libraries=places"></script>
+<style>
+body { margin: 0; padding: 0; }
+#map { position: absolute; top: 0; bottom: 0; width: 100%; }
+#sidebar {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    width: 350px;
+    background: rgba(255, 255, 255, 0.9);
+    padding: 15px;
+    border-radius: 10px;
+    box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.2);
+    font-family: Arial, sans-serif;
+    z-index: 1000;
+}
+#routes-list { max-height: 150px; overflow-y: auto; margin-top: 10px; }
+button { margin-top: 10px; padding: 8px; cursor: pointer; }
+#share-link { margin-top: 20px; }
+</style>
+</head>
+<body>
+    <div id="sidebar">
+        <b>From:</b> <div id="start-geocoder"></div><br>
+        <b>Destination:</b> <div id="end-geocoder"></div><br>
+        <b>Travel Mode:</b> 
+        <select id="mode">
+            <option value="driving">Car</option>
+            <option value="walking">Walk</option>
+            <option value="cycling">Bicycle</option>
+        </select><br><br>
+        <b>Estimated Time:</b> <span id="time">N/A</span><br><br>
+        <b>Next Step:</b> <span id="next-step">N/A</span><br><br>
+        <b>Route Options:</b>
+        <ul id="routes-list"></ul>
+        <button id="voice-command"> Speak Destination</button><br>
+        <button id="share-location"> Share Location</button><br>
+        <div id="share-link" style="display:none;">
+            <b>Share Your Location:</b> <input type="text" id="location-link" readonly style="width: 100%;"><br>
+            <button onclick="copyLink()">Copy Link</button>
+        </div>
+    </div>
+    <div id="map"></div> 
+
+<script>
+    mapboxgl.accessToken = 'pk.eyJ1IjoiYWJhc3UxMDAiLCJhIjoiY203cGE1aTN5MDF3aTJpc2piZm1ibnEwOCJ9.QAceeshyu617lQ6GmKDGLw';
+    const map = new mapboxgl.Map({
+        container: 'map',
+        style: 'mapbox://styles/mapbox/streets-v11',
+        center: [-2, 52],
+        zoom: 9
+    });
+
+    map.addControl(new mapboxgl.GeolocateControl({ positionOptions: { enableHighAccuracy: true }, trackUserLocation: true }));
+    map.addControl(new mapboxgl.NavigationControl());
+
+    const startGeocoder = new MapboxGeocoder({ accessToken: mapboxgl.accessToken, mapboxgl: mapboxgl, placeholder: "Enter starting location" });
+    document.getElementById('start-geocoder').appendChild(startGeocoder.onAdd(map));
+
+    const endGeocoder = new MapboxGeocoder({ accessToken: mapboxgl.accessToken, mapboxgl: mapboxgl, placeholder: "Enter destination" });
+    document.getElementById('end-geocoder').appendChild(endGeocoder.onAdd(map));
+
+    let startCoords = null;
+    let endCoords = null;
+    let currentRoute = null;
+
+    startGeocoder.on('result', (event) => { startCoords = event.result.center; updateRoute(); });
+    endGeocoder.on('result', (event) => { endCoords = event.result.center; updateRoute(); });
+
+    document.getElementById('mode').addEventListener('change', updateRoute);
+
+    function updateRoute() {
+        if (startCoords && endCoords) {
+            const mode = document.getElementById('mode').value;
+            fetch(`https://api.mapbox.com/directions/v5/mapbox/${mode}/${startCoords[0]},${startCoords[1]};${endCoords[0]},${endCoords[1]}?steps=true&geometries=geojson&access_token=${mapboxgl.accessToken}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.routes.length > 0) {
+                        const route = data.routes[0];
+                        const routeCoords = route.geometry.coordinates;
+                        document.getElementById('time').innerText = `${Math.round(route.duration / 60)} min`;
+                        updateNextStep(route.legs[0].steps);
+
+                        if (currentRoute) {
+                            map.removeLayer('route');
+                            map.removeSource('route');
+                        }
+                        
+                        map.addSource('route', { type: 'geojson', data: { type: 'Feature', geometry: { type: 'LineString', coordinates: routeCoords } } });
+                        map.addLayer({ id: 'route', type: 'line', source: 'route', layout: { 'line-join': 'round', 'line-cap': 'round' }, paint: { 'line-color': '#3887be', 'line-width': 5 } });
+                        currentRoute = true;
+                    }
+                });
+        }
+    }
+
+    function updateNextStep(steps) {
+        if (steps.length > 0) {
+            document.getElementById('next-step').innerText = steps[0].maneuver.instruction;
+            speakDirection(steps[0].maneuver.instruction);
+        } else {
+            document.getElementById('next-step').innerText = "N/A";
+        }
+    }
+
+    // Function to use speech synthesis to read the direction
+    function speakDirection(text) {
+        const speech = new SpeechSynthesisUtterance(text);
+        window.speechSynthesis.speak(speech);
+    }
+
+    // Voice Command for setting the destination
+    document.getElementById('voice-command').addEventListener('click', () => {
+        const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+        recognition.lang = 'en-US';
+        recognition.start();
+
+        recognition.onresult = function(event) {
+            const spokenText = event.results[0][0].transcript.toLowerCase();
+            document.getElementById('end-geocoder').querySelector('input').value = spokenText;
+            endGeocoder.query();
+        };
+
+        recognition.onerror = function(event) {
+            console.log('Speech recognition error', event);
+        };
+    });
+
+    // Share location button functionality
+    document.getElementById('share-location').addEventListener('click', () => {
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(function(position) {
+                const userLatitude = position.coords.latitude;
+                const userLongitude = position.coords.longitude;
+                const locationLink = `https://www.openstreetmap.org/?mlat=${userLatitude}&mlon=${userLongitude}#map=16/${userLatitude}/${userLongitude}`;
+                
+                document.getElementById('location-link').value = locationLink;
+                document.getElementById('share-link').style.display = 'block';
+            }, function(error) {
+                alert("Error: Unable to fetch your location.");
+            });
+        } else {
+            alert("Geolocation is not supported by your browser.");
+        }
+    });
+
+    // Copy the location link to clipboard
+    function copyLink() {
+        const linkInput = document.getElementById('location-link');
+        linkInput.select();
+        linkInput.setSelectionRange(0, 99999); // For mobile devices
+        document.execCommand('copy');
+        alert('Location link copied to clipboard!');
+    }
+</script>
+</body>
+</html>
